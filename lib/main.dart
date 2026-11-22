@@ -16,6 +16,7 @@ void main() {
 
 class NetworkImageWithRetry extends StatefulWidget {
   final String imageUrl;
+  final List<String>? alternativeImages;
   final double? height;
   final BoxFit fit;
   final IconData fallbackIcon;
@@ -23,6 +24,7 @@ class NetworkImageWithRetry extends StatefulWidget {
   const NetworkImageWithRetry({
     super.key,
     required this.imageUrl,
+    this.alternativeImages,
     this.height,
     this.fit = BoxFit.contain,
     this.fallbackIcon = Icons.style,
@@ -33,31 +35,88 @@ class NetworkImageWithRetry extends StatefulWidget {
 }
 
 class _NetworkImageWithRetryState extends State<NetworkImageWithRetry> {
+  int _currentIndex = 0;
   Key _imageKey = UniqueKey();
+
+  List<String> get _urls {
+    final list = <String>[];
+    if (widget.imageUrl.isNotEmpty) list.add(widget.imageUrl);
+    if (widget.alternativeImages != null) {
+      list.addAll(widget.alternativeImages!);
+    }
+    
+    // Generar rutas dinámicas adicionales sobre la marcha para promos y cartas sin rareza
+    for (final u in list.toList()) {
+      if (u.contains('/high.png')) {
+        list.add(u.replaceFirst('/high.png', '/low.png'));
+      }
+      if (u.contains('/es/')) {
+        list.add(u.replaceFirst('/es/', '/en/'));
+      }
+      if (u.contains('-')) {
+        list.add(u.replaceAll('-', '/'));
+      }
+    }
+
+    return list.toSet().toList();
+  }
+
+  void _handleError() {
+    setState(() {
+      if (_currentIndex < _urls.length - 1) {
+        _currentIndex++;
+        _imageKey = UniqueKey();
+      } else {
+        _currentIndex = 0;
+      }
+    });
+  }
 
   void _retry() {
     setState(() {
+      _currentIndex = 0;
       _imageKey = UniqueKey();
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    if (widget.imageUrl.isEmpty) {
+    final urls = _urls;
+    if (urls.isEmpty) {
       return Icon(widget.fallbackIcon, size: widget.height ?? 52, color: Colors.white70);
     }
 
-    if (widget.imageUrl.startsWith('http://') || widget.imageUrl.startsWith('https://')) {
+    final currentUrl = urls[_currentIndex];
+
+    if (currentUrl.startsWith('http://') || currentUrl.startsWith('https://')) {
       return Image.network(
-        widget.imageUrl,
+        currentUrl,
         key: _imageKey,
         height: widget.height,
         fit: widget.fit,
+        headers: const {'User-Agent': 'SnapCard/1.0'},
         errorBuilder: (context, error, stackTrace) {
-          return InkWell(
-            onTap: _retry,
+          if (_currentIndex < urls.length - 1) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) _handleError();
+            });
+            return const SizedBox.shrink();
+          }
+
+          return GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {
+              _retry();
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Reintentando descargar imagen...'),
+                  duration: Duration(seconds: 1),
+                  backgroundColor: Color(0xFFEA7424),
+                ),
+              );
+            },
             child: Padding(
-              padding: const EdgeInsets.all(8.0),
+              padding: const EdgeInsets.all(16.0),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -84,7 +143,7 @@ class _NetworkImageWithRetryState extends State<NetworkImageWithRetry> {
       );
     } else {
       return Image.file(
-        File(widget.imageUrl),
+        File(currentUrl),
         key: _imageKey,
         height: widget.height,
         fit: widget.fit,
@@ -96,13 +155,46 @@ class _NetworkImageWithRetryState extends State<NetworkImageWithRetry> {
   }
 }
 
-Widget buildCardImage(String imageUrl, IconData fallbackIcon, {double? height, BoxFit fit = BoxFit.contain}) {
+Widget buildCardImage(String imageUrl, IconData fallbackIcon, {double? height, BoxFit fit = BoxFit.contain, List<String>? alternativeImages}) {
   return NetworkImageWithRetry(
     imageUrl: imageUrl,
+    alternativeImages: alternativeImages,
     height: height,
     fit: fit,
     fallbackIcon: fallbackIcon,
   );
+}
+
+List<TcgdexCard> analyzeAndFixCollectionImages(List<TcgdexCard> cards) {
+  return cards.map((card) {
+    if (card.imageUrl.isEmpty || card.imageUrl.contains('placeholder')) {
+      final cleanedId = card.id.toLowerCase().trim();
+      final alternativeUrl = cleanedId.contains('-')
+          ? 'https://assets.tcgdex.net/es/${cleanedId.replaceAll("-", "/")}/high.png'
+          : 'https://assets.tcgdex.net/es/$cleanedId/high.png';
+
+      return TcgdexCard(
+        id: card.id,
+        name: card.name,
+        imageUrl: alternativeUrl,
+        alternativeImages: [
+          ...card.alternativeImages,
+          'https://images.pokemontcg.io/base1/4_hires.png',
+        ],
+        category: card.category,
+        rarity: card.rarity,
+        localId: card.localId,
+        setId: card.setId,
+        setName: card.setName,
+        hp: card.hp,
+        types: card.types,
+        stage: card.stage,
+        illustrator: card.illustrator,
+        price: card.price,
+      );
+    }
+    return card;
+  }).toList();
 }
 
 // URL RAW exacta de tu repositorio de GitHub
@@ -887,16 +979,24 @@ class _CollectionScreenState extends State<CollectionScreen> {
 
     if (mounted) {
       setState(() {
-        collection = [...normalCards, ...tcgdexCards];
-        wishlist = wishlistCards;
+        collection = [...normalCards, ...analyzeAndFixCollectionImages(tcgdexCards)];
+        wishlist = analyzeAndFixCollectionImages(wishlistCards);
         isLoading = false;
       });
     }
   }
 
-  double get totalPrice => collection
-      .whereType<CardItem>()
-      .fold<double>(0, (sum, card) => sum + card.price);
+  double get totalPrice {
+    double sum = 0;
+    for (final card in collection) {
+      if (card is CardItem) {
+        sum += card.price;
+      } else if (card is TcgdexCard && card.price != null) {
+        sum += card.price!;
+      }
+    }
+    return sum;
+  }
 
 void _showCardDetails(dynamic card) {
   final bool isTcgdex = card is TcgdexCard;
@@ -1342,7 +1442,7 @@ else
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        '\$${totalPrice.toStringAsFixed(2)} USD',
+                        'RD\$${totalPrice.toStringAsFixed(0)}',
                         style: const TextStyle(
                           color: Colors.white,
                           fontSize: 22,
@@ -2226,6 +2326,26 @@ class _SearchScreenState extends State<SearchScreen> {
     } catch (_) {}
   }
 
+  Future<void> _precacheImages(List<TcgdexCard> cards) async {
+    for (final card in cards.take(10)) {
+      final urls = <String>[];
+      if (card.imageUrl.isNotEmpty) urls.add(card.imageUrl);
+      urls.addAll(card.alternativeImages);
+
+      for (final url in urls) {
+        if (url.startsWith('http://') || url.startsWith('https://')) {
+          try {
+            await precacheImage(
+              NetworkImage(url, headers: const {'User-Agent': 'SnapCard/1.0'}),
+              context,
+            );
+            break;
+          } catch (_) {}
+        }
+      }
+    }
+  }
+
   Future<void> _performSearch() async {
     final query = searchController.text.trim();
 
@@ -2244,13 +2364,18 @@ class _SearchScreenState extends State<SearchScreen> {
     });
 
     try {
-      final results = await ApiService.searchTcgdexCards(query);
+      final results = await ApiService.searchTcgdexCards(
+        query,
+        category: selectedCategory,
+      );
+      final fixedResults = analyzeAndFixCollectionImages(results);
 
       if (mounted) {
         setState(() {
-          searchResults = results;
+          searchResults = fixedResults;
           isLoading = false;
         });
+        _precacheImages(fixedResults);
       }
     } catch (e) {
       if (mounted) {
@@ -2259,23 +2384,6 @@ class _SearchScreenState extends State<SearchScreen> {
           isLoading = false;
         });
       }
-    }
-  }
-
-  IconData _getElementIcon(String elementType) {
-    switch (elementType.toLowerCase()) {
-      case 'fuego':
-        return Icons.local_fire_department;
-      case 'agua':
-        return Icons.water_drop;
-      case 'planta':
-        return Icons.forest;
-      case 'electrico':
-        return Icons.bolt;
-      case 'psiquico':
-        return Icons.auto_awesome;
-      default:
-        return Icons.style;
     }
   }
 
@@ -3020,7 +3128,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
       } catch (_) {}
 
       final count = normalCards.length + tcgdexCards.length;
-      final totalVal = normalCards.fold(0.0, (sum, item) => sum + item.price);
+      final valNorm = normalCards.fold(0.0, (sum, item) => sum + item.price);
+      final valTcg = tcgdexCards.fold(0.0, (sum, item) => sum + (item.price ?? 0.0));
+      final totalVal = valNorm + valTcg;
       final percentage = (count / 100 * 100).clamp(0, 100).toInt();
 
       if (mounted) {
@@ -3434,7 +3544,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
       child: ListView(
         padding: const EdgeInsets.fromLTRB(20, 24, 20, 30),
         children: [
-          AppHeader(),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(child: AppHeader()),
+              IconButton(
+                onPressed: _loadProfile,
+                icon: const Icon(Icons.refresh, color: Color(0xFFFFB13B)),
+                tooltip: 'Actualizar perfil y colección',
+              ),
+            ],
+          ),
           const SizedBox(height: 32),
           Center(
             child: Stack(
@@ -3531,7 +3651,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
               const SizedBox(width: 12),
               Expanded(
                 child: ProfileStat(
-                  value: '\$${totalCollectionValue.toStringAsFixed(0)}',
+                  value: 'RD\$${totalCollectionValue.toStringAsFixed(0)}',
                   label: 'Valor total',
                 ),
               ),
